@@ -38,15 +38,20 @@ const main = async () => {
 
     const sdk = new PumpFunSDK(provider)
 
-    const data: Array<{ wallet: string, amount: number }> = JSON.parse(fs.readFileSync('data.json', 'utf-8'))
-    const keypairList = data.map(item => Keypair.fromSecretKey(bs58.decode(item.wallet)))
-    const amountList = data.map(item => BigInt(item.amount * LAMPORTS_PER_SOL))
+    // const data: Array<{ wallet: string, amount: number }> = JSON.parse(fs.readFileSync('data.json', 'utf-8'))
+    // const keypairList = data.map(item => Keypair.fromSecretKey(bs58.decode(item.wallet)))
+    // const amountList = data.map(item => BigInt(item.amount * LAMPORTS_PER_SOL))
 
     const mint = Keypair.generate()
     console.log(mint.publicKey.toBase58())
+    console.log(mint.secretKey)
 
-    const mintResult = await sdk.createAndBatchBuy(keypairList, amountList, tokenMetadata, mint)
-    console.log(mintResult)
+    // const mintResult = await sdk.createAndBatchBuy(keypairList, amountList, tokenMetadata, mint)
+    // console.log(mintResult)
+    const creator = Keypair.fromSecretKey(Uint8Array.from(bs58.decode('5av2H2smVFbgSHCAhQkN4k2qnu74NBhJdv93JiZzdcg3mBGcRjqqvpRsrqxQ9nt5Ytt6doW6qDfPQAbyK2YeALk6')))
+    const buyer = Keypair.fromSecretKey(Uint8Array.from(bs58.decode('28T3svRUgKQQkZne96sRUdTAnPjQFgwozpiaU2rvWRjrJa3fsjgKreRV2C7k3368rEepFTtSbmFV24eDRzeqFYmf')))
+    console.log('---')
+    await sdk.parallelCreateAndBuy(creator, buyer, tokenMetadata, 100000n, mint)
 }
 
 main()

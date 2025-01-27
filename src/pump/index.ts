@@ -222,6 +222,77 @@ export class PumpFunSDK {
         }
     }
 
+    async parallelCreateAndBuy(
+        creator: Keypair,
+        buyer: Keypair,
+        createTokenMetadata: CreateTokenMetadata,
+        buyAmountSol: bigint,
+        mint?: Keypair,
+        slippageBasisPoints: bigint = 500n,
+        priorityFees?: PriorityFee,
+        commitment: Commitment = commitmentType.Confirmed,
+        finality: Finality = commitmentType.Finalized
+        // ): Promise<TransactionResult> {
+    ) {
+        const tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
+
+        if (!mint) mint = Keypair.generate()
+        const createTx = await this.getCreateInstructions(
+            creator.publicKey,
+            createTokenMetadata.name,
+            createTokenMetadata.symbol,
+            tokenMetadata.metadataUri,
+            mint
+        );
+
+        if (buyAmountSol > 0) {
+            const globalAccount = await this.getGlobalAccount(commitment);
+            const buyAmount = globalAccount.getInitialBuyPrice(buyAmountSol);
+            const buyAmountWithSlippage = calculateWithSlippageBuy(
+                buyAmountSol,
+                slippageBasisPoints
+            );
+
+            const buyTx = await this.getBuyInstructions(
+                buyer.publicKey,
+                mint.publicKey,
+                globalAccount.feeRecipient,
+                buyAmount,
+                buyAmountWithSlippage
+            );
+
+            const processedBlockHash = (await this.connection.getLatestBlockhash('processed')).blockhash;
+            const finalizedBlockHash = (await this.connection.getLatestBlockhash('finalized')).blockhash;
+            const createMessageV0 = new TransactionMessage({
+                payerKey: creator.publicKey,
+                recentBlockhash: processedBlockHash,
+                instructions: createTx.instructions,
+            }).compileToV0Message();
+
+            const createVTx = new VersionedTransaction(createMessageV0);
+            createVTx.sign([creator, mint]);
+
+            const buyMessageV0 = new TransactionMessage({
+                payerKey: buyer.publicKey,
+                recentBlockhash: finalizedBlockHash,
+                instructions: buyTx.instructions,
+            }).compileToV0Message();
+
+            const buyVTx = new VersionedTransaction(buyMessageV0);
+            buyVTx.sign([buyer]);
+
+            await Promise.all([createVTx, buyVTx].map(async (tx) => {
+                // const sim = await this.connection.simulateTransaction(tx, { sigVerify: true });
+                // console.log('sim', sim.value)
+                const sig = await this.connection.sendTransaction(tx,{skipPreflight: true});
+                console.log('sig', sig)
+                const confirm = await this.connection.confirmTransaction(sig);
+                console.log('confirm', confirm)
+            }));
+        }
+
+    }
+
     async createTokenMetadata(create: CreateTokenMetadata) {
         const formData = new FormData();
         formData.append("file", create.file),
