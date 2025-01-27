@@ -48,8 +48,8 @@ const main = async () => {
 
     // const mintResult = await sdk.createAndBatchBuy(keypairList, amountList, tokenMetadata, mint)
     // console.log(mintResult)
-    const creator = Keypair.fromSecretKey(Uint8Array.from(bs58.decode('5av2H2smVFbgSHCAhQkN4k2qnu74NBhJdv93JiZzdcg3mBGcRjqqvpRsrqxQ9nt5Ytt6doW6qDfPQAbyK2YeALk6')))
-    const buyer = Keypair.fromSecretKey(Uint8Array.from(bs58.decode('28T3svRUgKQQkZne96sRUdTAnPjQFgwozpiaU2rvWRjrJa3fsjgKreRV2C7k3368rEepFTtSbmFV24eDRzeqFYmf')))
+    const creator = Keypair.fromSecretKey(Uint8Array.from(bs58.decode(process.env.HEX_KEY_1!)))
+    const buyer = Keypair.fromSecretKey(Uint8Array.from(bs58.decode(process.env.HEX_KEY_1!)))
     console.log('---')
     await sdk.parallelCreateAndBuy(creator, buyer, tokenMetadata, 100000n, mint)
 }
