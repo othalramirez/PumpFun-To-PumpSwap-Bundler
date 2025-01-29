@@ -6,7 +6,6 @@ import {
     getAccount,
     getAssociatedTokenAddress,
     getAssociatedTokenAddressSync,
-    NATIVE_MINT,
     TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
@@ -19,7 +18,6 @@ import {
     VersionedTransaction,
     TransactionMessage,
     TransactionInstruction,
-    AddressLookupTableProgram,
 } from "@solana/web3.js";
 
 import { jitoPumpBundle } from "./jitoBundle";
@@ -32,16 +30,13 @@ import {
     toTradeEvent,
 } from "./utils/events";
 import {
-    buildTx,
     calculateWithSlippageBuy,
     calculateWithSlippageSell,
     chunkArray,
     createLookupTable,
-    getRandomInt,
     sendTx,
 } from "./utils";
 import {
-    BatchBuyTransactionResult,
     CompleteEvent,
     CreateEvent,
     CreateTokenMetadata,
@@ -54,7 +49,6 @@ import {
     TransactionResult,
 } from "./utils/types";
 import { commitmentType, eventAuthority, pumpFunProgram, rentProgram, systemProgram } from "../config";
-import { error } from "console";
 
 export class PumpFunSDK {
     public GLOBAL_ACCOUNT_SEED = "global"
@@ -79,14 +73,14 @@ export class PumpFunSDK {
         creator: Keypair,
         createTokenMetadata: CreateTokenMetadata,
         buyAmountSol: bigint,
+        mint?: Keypair,
         slippageBasisPoints: bigint = 500n,
         priorityFees?: PriorityFee,
-        mint?: Keypair,
         commitment: Commitment = commitmentType.Confirmed,
         finality: Finality = commitmentType.Finalized
     ): Promise<TransactionResult> {
         const tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
-
+        console.log(mint?.publicKey.toBase58())
         if (!mint) mint = Keypair.generate()
         const createTx = await this.getCreateInstructions(
             creator.publicKey,
@@ -128,6 +122,7 @@ export class PumpFunSDK {
         );
 
         createAndBuyResults.results = { mint: mint.publicKey.toBase58() }
+        console.log('createAndBuyResults created')
         return createAndBuyResults
     }
 
@@ -284,7 +279,7 @@ export class PumpFunSDK {
             await Promise.all([createVTx, buyVTx].map(async (tx) => {
                 // const sim = await this.connection.simulateTransaction(tx, { sigVerify: true });
                 // console.log('sim', sim.value)
-                const sig = await this.connection.sendTransaction(tx,{skipPreflight: true});
+                const sig = await this.connection.sendTransaction(tx, { skipPreflight: true });
                 console.log('sig', sig)
                 const confirm = await this.connection.confirmTransaction(sig);
                 console.log('confirm', confirm)
