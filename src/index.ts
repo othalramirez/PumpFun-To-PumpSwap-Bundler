@@ -3,17 +3,16 @@ import fs from 'fs'
 import { AnchorProvider, Program } from "@coral-xyz/anchor";
 import { geyserRpc, JITO_TIP_ACC, mainKeypair, solanaConnection } from "./config";
 import { PumpFunSDK } from "./pump";
-import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
+// import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
 import { openAsBlob, existsSync } from "fs";
 import WebSocket from 'ws';
 import path from "path";
-import { ComputeBudgetProgram, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
-import { sendRequest, sendTxUsingJito } from './utils';
-import { createAssociatedTokenAccountInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
+import { Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+import { sendRequest } from './utils';
 import { PumpFun, PumpFunIDL } from './pump/utils/IDL';
-import { BN } from 'bn.js';
+import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet';
 
-const main = async () => {
+const createAndBatchBuy = async () => {
     const wallet = new NodeWallet(mainKeypair)
     const provider = new AnchorProvider(solanaConnection, wallet, {
         commitment: "finalized",
@@ -42,14 +41,17 @@ const main = async () => {
     }
 
     const sdk = new PumpFunSDK(provider)
+    const count = 20
+    const amount = 0.000001
 
-    // const data: Array<{ wallet: string, amount: number }> = JSON.parse(fs.readFileSync('data.json', 'utf-8'))
-    // const keypairList = data.map(item => Keypair.fromSecretKey(bs58.decode(item.wallet)))
-    // const amountList = data.map(item => BigInt(item.amount * LAMPORTS_PER_SOL))
-
-    const mint = Keypair.generate()
-    console.log(mint.publicKey.toBase58())
-    console.log(mint.secretKey)
+    const dataList: Array<string> = []
+    for (let i = 0; i < count; i++) {
+        const mint = Keypair.generate()
+        dataList.push(bs58.encode(mint.secretKey))
+    }
+    console.log('--------------')
+    fs.writeFileSync('data.json', JSON.stringify({}))
+    // fs.writeFileSync('data.json', JSON.stringify(dataList, null, 2))
 
     // const mintResult = await sdk.createAndBatchBuy(keypairList, amountList, tokenMetadata, mint)
     // console.log(mintResult)
@@ -170,8 +172,3 @@ const withGaser = () => {
         }
     })
 }
-
-// main()
-
-withGaser()
-

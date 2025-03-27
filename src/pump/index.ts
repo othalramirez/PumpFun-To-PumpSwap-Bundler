@@ -20,7 +20,7 @@ import {
     TransactionInstruction,
 } from "@solana/web3.js";
 
-import { jitoPumpBundle } from "./jitoBundle";
+import { jitoPumpBundle, jitoSellBundle } from "./jitoBundle";
 import { PumpFunIDL, PumpFun } from "./utils/IDL";
 import { GlobalAccount, BondingCurveAccount } from "./utils/accounts";
 import {
@@ -73,61 +73,130 @@ export class PumpFunSDK {
         creator: Keypair,
         createTokenMetadata: CreateTokenMetadata,
         buyAmountSol: bigint,
+        slippageBasisPoints: bigint = 500n,
+        priorityFees?: PriorityFee,
         mint?: Keypair,
+        commitment: Commitment = commitmentType.Confirmed,
+        finality: Finality = commitmentType.Finalized
+      ): Promise<TransactionResult> {
+        const tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
+    
+        if (!mint) mint = Keypair.generate();
+        const createTx = await this.getCreateInstructions(
+          creator.publicKey,
+          createTokenMetadata.name,
+          createTokenMetadata.symbol,
+          tokenMetadata.metadataUri,
+          mint
+        );
+    
+        const newTx = new Transaction().add(createTx);
+    
+        if (buyAmountSol > 0) {
+          const globalAccount = await this.getGlobalAccount(commitment);
+          const buyAmount = globalAccount.getInitialBuyPrice(buyAmountSol);
+          const buyAmountWithSlippage = calculateWithSlippageBuy(
+            buyAmountSol,
+            slippageBasisPoints
+          );
+    
+          const buyTx = await this.getBuyInstructions(
+            creator.publicKey,
+            mint.publicKey,
+            globalAccount.feeRecipient,
+            buyAmount,
+            buyAmountWithSlippage
+          );
+    
+          newTx.add(buyTx);
+        }
+    
+        const createAndBuyResults = await sendTx(
+          this.connection,
+          newTx,
+          creator.publicKey,
+          [creator, mint],
+          priorityFees,
+          commitment,
+          finality
+        );
+    
+        createAndBuyResults.results = { mint: mint.publicKey.toBase58() };
+        return createAndBuyResults;
+      }
+    
+      async batchSell(
+        payer: Keypair,
+        mint: PublicKey,
+        sellers: Array<Keypair>,
+        sellTokenAmount: Array<bigint>,
         slippageBasisPoints: bigint = 500n,
         priorityFees?: PriorityFee,
         commitment: Commitment = commitmentType.Confirmed,
         finality: Finality = commitmentType.Finalized
-    ): Promise<TransactionResult> {
-        const tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
-        console.log(mint?.publicKey.toBase58())
-        if (!mint) mint = Keypair.generate()
-        const createTx = await this.getCreateInstructions(
-            creator.publicKey,
-            createTokenMetadata.name,
-            createTokenMetadata.symbol,
-            tokenMetadata.metadataUri,
-            mint
+      ): Promise<TransactionResult> {
+        const splitedKeypairArray = chunkArray(sellers, this.count);
+        const splitedAmountArray = chunkArray(sellTokenAmount, this.count);
+    
+        const sellTx = await this.batchSellInx(
+          splitedKeypairArray,
+          splitedAmountArray,
+          mint
         );
-
-        const newTx = new Transaction().add(createTx);
-
-        if (buyAmountSol > 0) {
-            const globalAccount = await this.getGlobalAccount(commitment);
-            const buyAmount = globalAccount.getInitialBuyPrice(buyAmountSol);
-            const buyAmountWithSlippage = calculateWithSlippageBuy(
-                buyAmountSol,
-                slippageBasisPoints
-            );
-
-            const buyTx = await this.getBuyInstructions(
-                creator.publicKey,
-                mint.publicKey,
-                globalAccount.feeRecipient,
-                buyAmount,
-                buyAmountWithSlippage
-            );
-
-            newTx.add(buyTx);
+    
+        if (sellTx.Err) {
+          return {
+            success: false,
+            error: sellTx.Err.message,
+          };
         }
-
-        const createAndBuyResults = await sendTx(
-            this.connection,
-            newTx,
-            creator.publicKey,
-            [creator, mint],
-            priorityFees,
-            commitment,
-            finality
-        );
-
-        createAndBuyResults.results = { mint: mint.publicKey.toBase58() }
-        console.log('createAndBuyResults created')
-        return createAndBuyResults
-    }
-
-    async createAndBatchBuy(
-        creator: Array<Keypair>,
+    
+        if (sellTx.Ok) {
+          const sellVTxList: Array<VersionedTransaction> = [];
+    
+          for (const [i, tx] of sellTx.Ok.txList.entries()) {
+            const latestBlockhash = await this.connection.getLatestBlockhash(
+              "finalized"
+            );
+            const sellTxMsg = new TransactionMessage({
+              payerKey: payer.publicKey,
+              recentBlockhash: latestBlockhash.blockhash,
+              instructions: tx.instructions,
+            }).compileToV0Message([]);
+    
+            const sellVTx = new VersionedTransaction(sellTxMsg);
+            sellVTx.sign([splitedKeypairArray[0][0], ...splitedKeypairArray[i]]);
+    
+            sellVTxList.push(sellVTx);
+          }
+    
+          const bundleResult = await jitoSellBundle(sellVTxList, payer);
+          if (bundleResult.confirmed) {
+            return {
+              success: true,
+              results: {
+                mint: mint.toBase58(),
+                bundleId: bundleResult.bundleId,
+                tipTx: bundleResult.jitoTxsignature,
+              },
+            };
+          } else {
+            return {
+              success: false,
+              error: "bundling error",
+            };
+          }
+        } else {
+          return {
+            success: false,
+            error: "sell tx error",
+          };
+        }
+      }
+    
+      async createAndBatchBuy(
+        creator: Keypair,
+        buyers: Array<Keypair>,
         buyAmountSol: Array<bigint>,
         createTokenMetadata: CreateTokenMetadata,
         mint?: Keypair,
@@ -136,191 +205,170 @@ export class PumpFunSDK {
         priorityFees?: PriorityFee,
         commitment: Commitment = commitmentType.Confirmed,
         finality: Finality = commitmentType.Finalized
-    ) {
-        if (!mint) mint = Keypair.generate()
-
-        const payer = creator[0]
-
-        const mintAtaList = creator.map(item => getAssociatedTokenAddressSync(mint.publicKey, item.publicKey))
-
+      ) {
+        if (!mint) mint = Keypair.generate();
+    
+        const payer = creator;
+    
+        const mintAtaList = buyers.map((item) =>
+          getAssociatedTokenAddressSync(mint.publicKey, item.publicKey)
+        );
+    
         // create lookup table
         const globalAccount = await this.getGlobalAccount("finalized");
         const associatedBondingCurve = getAssociatedTokenAddressSync(
-            mint.publicKey,
-            this.getBondingCurvePDA(mint.publicKey),
-            true
+          mint.publicKey,
+          this.getBondingCurvePDA(mint.publicKey),
+          true
         );
-        const lutAddressList = [...creator.map(item => item.publicKey), ...mintAtaList, mint.publicKey, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, systemProgram, eventAuthority, pumpFunProgram, rentProgram, this.GLOBAL_MINT, globalAccount.feeRecipient, associatedBondingCurve]
-        const lutResult = await createLookupTable(this.connection, payer, lutAddressList)
+        const lutAddressList = [
+          ...buyers.map((item) => item.publicKey),
+          ...mintAtaList,
+          mint.publicKey,
+          TOKEN_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram,
+          eventAuthority,
+          pumpFunProgram,
+          rentProgram,
+          this.GLOBAL_MINT,
+          globalAccount.feeRecipient,
+          associatedBondingCurve,
+        ];
+    
+        const lutResult = await createLookupTable(
+          this.connection,
+          payer,
+          lutAddressList
+        );
         if (lutResult.Err) {
-            console.error('error occurs while creating lut')
-            return {
-                success: false, error: 'creating lut table'
-            }
+          console.error("error occurs while creating lut");
+          return {
+            success: false,
+            error: "creating lut table account error",
+          };
         }
-
-        const lutAddress = lutResult.Ok?.lookupTable
-
-        console.log(lutAddress?.toBase58())
-        if (!lutAddress) return
-
+    
+        const lutAddress = lutResult.Ok?.lookupTable;
+    
+        if (!lutAddress)
+          return {
+            success: false,
+            error: "getting lut table address error",
+          };
+    
         const tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
         const createTx = await this.getCreateInstructions(
-            payer.publicKey,
-            createTokenMetadata.name,
-            createTokenMetadata.symbol,
-            tokenMetadata.metadataUri,
-            mint
+          payer.publicKey,
+          createTokenMetadata.name,
+          createTokenMetadata.symbol,
+          tokenMetadata.metadataUri,
+          mint
         );
-
-        const splitedKeypairArray = chunkArray(creator, this.count)
-        const splitedAmountArray = chunkArray(buyAmountSol, this.count)
-
-        const buyTx = await this.batchBuyInx(splitedKeypairArray, splitedAmountArray, mint.publicKey, new PublicKey(lutAddress))
-
+    
+        const splitedKeypairArray = chunkArray(buyers, this.count);
+        const splitedAmountArray = chunkArray(buyAmountSol, this.count);
+    
+        const buyTx = await this.batchBuyInx(
+          splitedKeypairArray,
+          splitedAmountArray,
+          mint.publicKey,
+          new PublicKey(lutAddress)
+        );
+        // const buyTx = await this.batchBuyInx(splitedKeypairArray, splitedAmountArray, new PublicKey('AnoknYzfWdQ4F7ELF5BnYDTCZGbPHQs2SifuLxdmurgS'), new PublicKey(lutAddress))
+    
         if (buyTx.Err) {
-            return {
-                success: false,
-                error: buyTx.Err.message
-            }
+          return {
+            success: false,
+            error: buyTx.Err.message,
+          };
         }
-
+    
         if (buyTx.Ok) {
-            const lookupTable = (await this.connection.getAddressLookupTable(lutAddress)).value;
-
-            if (lookupTable == null) {
-                console.error('lookup table creation failed')
-                return
-            }
-
-            console.log('here')
-
-            const buyVTxList: Array<VersionedTransaction> = []
-
-            for (const [i, tx] of buyTx.Ok.txList.entries()) {
-                const latestBlockhash = await this.connection.getLatestBlockhash('finalized');
-                const buyTxMsg = new TransactionMessage({
-                    payerKey: payer.publicKey,
-                    recentBlockhash: latestBlockhash.blockhash,
-                    instructions: tx.instructions
-                }).compileToV0Message([lookupTable]);
-
-                const buyVTx = new VersionedTransaction(buyTxMsg);
-                buyVTx.sign([splitedKeypairArray[0][0], ...splitedKeypairArray[i]])
-
-                buyVTxList.push(buyVTx)
-            }
-
-            const bundleResult = await jitoPumpBundle(createTx, [payer, mint], buyVTxList, payer)
-            console.log(bundleResult)
-            return bundleResult
+          const lookupTable = (
+            await this.connection.getAddressLookupTable(lutAddress)
+          ).value;
+    
+          if (lookupTable == null) {
+            console.error("lookup table creation failed");
+            return {
+              success: false,
+              error: "getting lut data error",
+            };
+          }
+    
+          const latestBlockhash = await this.connection.getLatestBlockhash(
+            "finalized"
+          );
+          const buyVTxList = buyTx.Ok.txList.map((tx, i) => {
+            const buyTxMsg = new TransactionMessage({
+              payerKey: payer.publicKey,
+              recentBlockhash: latestBlockhash.blockhash,
+              instructions: tx.instructions,
+            }).compileToV0Message([lookupTable]);
+    
+            const buyVTx = new VersionedTransaction(buyTxMsg);
+            buyVTx.sign([splitedKeypairArray[0][0], ...splitedKeypairArray[i]]);
+    
+            return buyVTx;
+          });
+    
+          const bundleResult = await jitoPumpBundle(
+            createTx,
+            [payer, mint],
+            buyVTxList,
+            payer
+          );
+          if (bundleResult.confirmed) {
+            return {
+              success: true,
+              mint: mint.publicKey.toBase58(),
+              bundleId: bundleResult.bundleId,
+              tipTx: bundleResult.jitoTxsignature,
+            };
+          } else {
+            return {
+              success: false,
+              error: "bundling error",
+            };
+          }
         }
-    }
-
-    async parallelCreateAndBuy(
-        creator: Keypair,
-        buyer: Keypair,
-        createTokenMetadata: CreateTokenMetadata,
-        buyAmountSol: bigint,
-        mint?: Keypair,
-        slippageBasisPoints: bigint = 500n,
-        priorityFees?: PriorityFee,
-        commitment: Commitment = commitmentType.Confirmed,
-        finality: Finality = commitmentType.Finalized
-        // ): Promise<TransactionResult> {
-    ) {
-        const tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
-
-        if (!mint) mint = Keypair.generate()
-        const createTx = await this.getCreateInstructions(
-            creator.publicKey,
-            createTokenMetadata.name,
-            createTokenMetadata.symbol,
-            tokenMetadata.metadataUri,
-            mint
-        );
-
-        if (buyAmountSol > 0) {
-            const globalAccount = await this.getGlobalAccount(commitment);
-            const buyAmount = globalAccount.getInitialBuyPrice(buyAmountSol);
-            const buyAmountWithSlippage = calculateWithSlippageBuy(
-                buyAmountSol,
-                slippageBasisPoints
-            );
-
-            const buyTx = await this.getBuyInstructions(
-                buyer.publicKey,
-                mint.publicKey,
-                globalAccount.feeRecipient,
-                buyAmount,
-                buyAmountWithSlippage
-            );
-
-            const processedBlockHash = (await this.connection.getLatestBlockhash('processed')).blockhash;
-            const finalizedBlockHash = (await this.connection.getLatestBlockhash('finalized')).blockhash;
-            const createMessageV0 = new TransactionMessage({
-                payerKey: creator.publicKey,
-                recentBlockhash: processedBlockHash,
-                instructions: createTx.instructions,
-            }).compileToV0Message();
-
-            const createVTx = new VersionedTransaction(createMessageV0);
-            createVTx.sign([creator, mint]);
-
-            const buyMessageV0 = new TransactionMessage({
-                payerKey: buyer.publicKey,
-                recentBlockhash: finalizedBlockHash,
-                instructions: buyTx.instructions,
-            }).compileToV0Message();
-
-            const buyVTx = new VersionedTransaction(buyMessageV0);
-            buyVTx.sign([buyer]);
-
-            await Promise.all([createVTx, buyVTx].map(async (tx) => {
-                // const sim = await this.connection.simulateTransaction(tx, { sigVerify: true });
-                // console.log('sim', sim.value)
-                const sig = await this.connection.sendTransaction(tx, { skipPreflight: true });
-                console.log('sig', sig)
-                const confirm = await this.connection.confirmTransaction(sig);
-                console.log('confirm', confirm)
-            }));
-        }
-
-    }
-
-    async createTokenMetadata(create: CreateTokenMetadata) {
+      }
+    
+      async createTokenMetadata(create: CreateTokenMetadata) {
         const formData = new FormData();
         formData.append("file", create.file),
-            formData.append("name", create.name),
-            formData.append("symbol", create.symbol),
-            formData.append("description", create.description),
-            formData.append("twitter", create.twitter || ""),
-            formData.append("telegram", create.telegram || ""),
-            formData.append("website", create.website || ""),
-            formData.append("showName", "true");
+          formData.append("name", create.name),
+          formData.append("symbol", create.symbol),
+          formData.append("description", create.description),
+          formData.append("twitter", create.twitter || ""),
+          formData.append("telegram", create.telegram || ""),
+          formData.append("website", create.website || ""),
+          formData.append("showName", "true");
         const request = await fetch("https://pump.fun/api/ipfs", {
-            method: "POST",
-            headers: {
-                "Host": "www.pump.fun",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Referer": "https://www.pump.fun/create",
-                "Origin": "https://www.pump.fun",
-                "Connection": "keep-alive",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "Priority": "u=1",
-                "TE": "trailers"
-            },
-            body: formData,
+          method: "POST",
+          headers: {
+            Host: "www.pump.fun",
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+            Accept: "*/*",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            Referer: "https://www.pump.fun/create",
+            Origin: "https://www.pump.fun",
+            Connection: "keep-alive",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            Priority: "u=1",
+            TE: "trailers",
+          },
+          body: formData,
         });
         return request.json();
-    }
-
-    async batchBuyInx(
+      }
+    
+      async batchBuyInx(
         splitedKeypairArray: Array<Array<Keypair>>,
         splitedAmountArray: Array<Array<bigint>>,
         mint: PublicKey,
@@ -329,142 +377,233 @@ export class PumpFunSDK {
         priorityFees?: PriorityFee,
         commitment: Commitment = commitmentType.Confirmed,
         finality: Finality = commitmentType.Finalized
-    ): Promise<Result<{ txList: Array<Transaction> }, { message: string }>> {
+      ): Promise<Result<{ txList: Array<Transaction> }, { message: string }>> {
         const globalAccount = await this.getGlobalAccount(commitment);
         const associatedBondingCurve = await getAssociatedTokenAddress(
-            mint,
-            this.getBondingCurvePDA(mint),
-            true
+          mint,
+          this.getBondingCurvePDA(mint),
+          true
         );
-
+    
         this.associatedUsers.splice(0, this.associatedUsers.length);
-
+    
+        let totalSolAmount = BigInt(0);
+        let totalTokenAmount = BigInt(0);
+    
         const buyTxList: Array<Transaction> = []
+    
+        const bondingCurveAccount = await this.getBondingCurveAccount(
+          this.GLOBAL_MINT,
+          commitment
+        );
+    
+        if (!bondingCurveAccount) {
+          return {
+            Err: {
+              message: 'bonding curve account error'
+            }
+          }
+        }
+    
         for (const [i, array] of splitedKeypairArray.entries()) {
-            const inxList: Array<TransactionInstruction> = []
-            for (const [j, keypairItem] of array.entries()) {
-                console.log('keypairItem', keypairItem.publicKey.toBase58())
-                const associatedUser = getAssociatedTokenAddressSync(mint, keypairItem.publicKey)
-                try {
-                    await getAccount(this.connection, associatedUser, commitment);
-                } catch (e) {
-                    if (this.associatedUsers.includes(associatedUser.toBase58()) == false) {
-                        console.log(i, j, 'adding ata...')
-                        inxList.push(
-                            createAssociatedTokenAccountInstruction(
-                                splitedKeypairArray[0][0].publicKey,
-                                associatedUser,
-                                keypairItem.publicKey,
-                                mint
-                            )
-                        );
-                        this.associatedUsers.push(associatedUser.toBase58());
-                    }
-                }
-
-                const bondingCurveAccount = await this.getBondingCurveAccount(
-                    this.GLOBAL_MINT,
-                    commitment
+          const inxList: Array<TransactionInstruction> = []
+          for (const [j, keypairItem] of array.entries()) {
+            const associatedUser = getAssociatedTokenAddressSync(mint, keypairItem.publicKey)
+            try {
+              await getAccount(this.connection, associatedUser, commitment);
+            } catch (e) {
+              if (this.associatedUsers.includes(associatedUser.toBase58()) == false) {
+                inxList.push(
+                  createAssociatedTokenAccountInstruction(
+                    splitedKeypairArray[0][0].publicKey,
+                    associatedUser,
+                    keypairItem.publicKey,
+                    mint
+                  )
                 );
-
-                if (!bondingCurveAccount) {
-                    return {
-                        Err: {
-                            message: 'bonding curve account error'
-                        }
-                    }
-                }
-
-                console.log('splitedAmountArray[i][j]', splitedAmountArray[i][j])
-                const buyAmount = bondingCurveAccount.getBuyPrice(splitedAmountArray[i][j]);
-
-                const buyAmountWithSlippage = calculateWithSlippageBuy(
-                    splitedAmountArray[i][j],
-                    slippageBasisPoints
-                );
-
-                console.log(i, j, 'buying...', buyAmount, buyAmountWithSlippage)
-                const inx = await this.program.methods
-                    .buy(new BN((buyAmount).toString()).div(new BN(10)).mul(new BN(9)), new BN(buyAmountWithSlippage.toString()))
-                    .accounts({
-                        feeRecipient: globalAccount.feeRecipient,
-                        mint: mint,
-                        associatedBondingCurve,
-                        associatedUser,
-                        user: splitedKeypairArray[i][j].publicKey,
-                    })
-                    .instruction()
-
-                inxList.push(inx)
+                this.associatedUsers.push(associatedUser.toBase58());
+              }
             }
-            const createTx = new Transaction().add(...inxList);
-            buyTxList.push(createTx)
+    
+            const buyAmount = bondingCurveAccount.getBuyPrice(splitedAmountArray[i][j] + totalSolAmount) - totalTokenAmount;
+    
+            totalSolAmount += splitedAmountArray[i][j]
+            totalTokenAmount += buyAmount
+    
+            const buyAmountWithSlippage = calculateWithSlippageBuy(
+              splitedAmountArray[i][j],
+              slippageBasisPoints
+            )
+    
+            const inx = await this.program.methods
+              .buy(new BN((buyAmount).toString()).div(new BN(10)).mul(new BN(9)), new BN(buyAmountWithSlippage.toString()))
+              .accounts({
+                feeRecipient: globalAccount.feeRecipient,
+                mint,
+                associatedBondingCurve,
+                associatedUser,
+                user: splitedKeypairArray[i][j].publicKey,
+              })
+              .instruction()
+    
+            inxList.push(inx)
+          }
+          const createTx = new Transaction().add(...inxList);
+          buyTxList.push(createTx)
         }
-
+    
         return {
-            Ok: {
-                txList: buyTxList
-            }
+          Ok: {
+            txList: buyTxList
+          }
         }
-    }
-
-    async CreateBatchAta(
+      }
+    
+      async batchSellInx(
+        splitedKeypairArray: Array<Array<Keypair>>,
+        splitedAmountArray: Array<Array<bigint>>,
+        mint: PublicKey,
+        slippageBasisPoints: bigint = 10000n,
+        priorityFees?: PriorityFee,
+        commitment: Commitment = commitmentType.Confirmed,
+        finality: Finality = commitmentType.Finalized
+      ): Promise<Result<{ txList: Array<Transaction> }, { message: string }>> {
+        const globalAccount = await this.getGlobalAccount(commitment);
+        const associatedBondingCurve = await getAssociatedTokenAddress(
+          mint,
+          this.getBondingCurvePDA(mint),
+          true
+        );
+    
+        const bondingCurveAccount = await this.getBondingCurveAccount(
+          mint,
+          commitment
+        );
+    
+        if (!bondingCurveAccount) {
+          return {
+            Err: {
+              message: "bonding curve account error",
+            },
+          };
+        }
+    
+        let totalTokenAmount = BigInt(0);
+        let totalSolAmount = BigInt(0);
+    
+        const sellTxList: Array<Transaction> = [];
+        for (const [i, array] of splitedKeypairArray.entries()) {
+          const inxList: Array<TransactionInstruction> = [];
+          for (const [j, keypairItem] of array.entries()) {
+    
+            const associatedUser = getAssociatedTokenAddressSync(
+              mint,
+              keypairItem.publicKey
+            );
+    
+            const minSolOutput = bondingCurveAccount.getSellPrice(
+              splitedAmountArray[i][j] + totalTokenAmount,
+              globalAccount.feeBasisPoints,
+              totalTokenAmount,
+              totalSolAmount
+            ) - totalSolAmount
+    
+            totalSolAmount += minSolOutput
+            totalTokenAmount += splitedAmountArray[i][j]
+    
+            const sellAmountWithSlippage = calculateWithSlippageSell(
+              minSolOutput,
+              slippageBasisPoints
+            );
+    
+            const inx = await this.program.methods
+              .sell(
+                new BN(splitedAmountArray[i][j].toString()),
+                new BN((sellAmountWithSlippage + 1n).toString())
+              )
+              .accounts({
+                feeRecipient: globalAccount.feeRecipient,
+                mint,
+                associatedBondingCurve,
+                associatedUser,
+                user: splitedKeypairArray[i][j].publicKey,
+              })
+              .instruction();
+    
+            inxList.push(inx);
+          }
+          const createTx = new Transaction().add(...inxList);
+          sellTxList.push(createTx);
+        }
+    
+        return {
+          Ok: {
+            txList: sellTxList,
+          },
+        };
+      }
+    
+      async CreateBatchAta(
         creator: Array<Keypair>,
         mint: PublicKey,
         lutAddress: PublicKey,
         commitment: Commitment = commitmentType.Confirmed,
         finality: Finality = commitmentType.Finalized
-    ) {
-        const payer = creator[0]
-
-        const keypairList = chunkArray(creator, 12)
+      ) {
+        const payer = creator[0];
+    
+        const keypairList = chunkArray(creator, 12);
         for (const [i, array] of keypairList.entries()) {
-            const inxList: Array<TransactionInstruction> = []
-            for (const [j, item] of array.entries()) {
-                const associatedUser = getAssociatedTokenAddressSync(mint, item.publicKey)
-                try {
-                    await getAccount(this.connection, associatedUser, commitment);
-                } catch (e) {
-                    inxList.push(
-                        createAssociatedTokenAccountInstruction(
-                            payer.publicKey,
-                            associatedUser,
-                            item.publicKey,
-                            mint
-                        )
-                    )
-                }
-
+          const inxList: Array<TransactionInstruction> = [];
+          for (const [j, item] of array.entries()) {
+            const associatedUser = getAssociatedTokenAddressSync(
+              mint,
+              item.publicKey
+            );
+            try {
+              await getAccount(this.connection, associatedUser, commitment);
+            } catch (e) {
+              inxList.push(
+                createAssociatedTokenAccountInstruction(
+                  payer.publicKey,
+                  associatedUser,
+                  item.publicKey,
+                  mint
+                )
+              );
             }
-
-            const latestBlockhash = await this.connection.getLatestBlockhash('finalized');
-            const lookupTable = (await this.connection.getAddressLookupTable(lutAddress)).value;
-
-            if (lookupTable == null) {
-                console.error('lookup table creation failed')
-                return
-            }
-
-            const msgV0 = new TransactionMessage({
-                payerKey: payer.publicKey,
-                recentBlockhash: latestBlockhash.blockhash,
-                instructions: inxList
-            }).compileToV0Message([lookupTable]);
-
-            const ataCreationVTx = new VersionedTransaction(msgV0);
-            ataCreationVTx.sign([payer])
-
-            const sim = await this.connection.simulateTransaction(ataCreationVTx, { sigVerify: true })
-            console.log('sim result', sim)
-            const sig = await this.connection.sendTransaction(ataCreationVTx)
-            const confirm = await this.connection.confirmTransaction(sig)
-            console.log(sig)
+          }
+    
+          const latestBlockhash = await this.connection.getLatestBlockhash(
+            "finalized"
+          );
+          const lookupTable = (
+            await this.connection.getAddressLookupTable(lutAddress)
+          ).value;
+    
+          if (lookupTable == null) {
+            console.error("lookup table creation failed");
+            return;
+          }
+    
+          const msgV0 = new TransactionMessage({
+            payerKey: payer.publicKey,
+            recentBlockhash: latestBlockhash.blockhash,
+            instructions: inxList,
+          }).compileToV0Message([lookupTable]);
+    
+          const ataCreationVTx = new VersionedTransaction(msgV0);
+          ataCreationVTx.sign([payer]);
+    
+          const sim = await this.connection.simulateTransaction(ataCreationVTx, {
+            sigVerify: true,
+          });
+          const sig = await this.connection.sendTransaction(ataCreationVTx);
+          const confirm = await this.connection.confirmTransaction(sig);
         }
-
-
-    }
-
-    async buy(
+      }
+    
+      async buy(
         buyer: Keypair,
         mint: PublicKey,
         buyAmountSol: bigint,
@@ -472,28 +611,28 @@ export class PumpFunSDK {
         priorityFees?: PriorityFee,
         commitment: Commitment = commitmentType.Confirmed,
         finality: Finality = commitmentType.Finalized
-    ): Promise<TransactionResult> {
+      ): Promise<TransactionResult> {
         const buyTx = await this.getBuyInstructionsBySolAmount(
-            buyer.publicKey,
-            mint,
-            buyAmountSol,
-            slippageBasisPoints,
-            commitment
+          buyer.publicKey,
+          mint,
+          buyAmountSol,
+          slippageBasisPoints,
+          commitment
         );
-
+    
         const buyResults = await sendTx(
-            this.connection,
-            buyTx,
-            buyer.publicKey,
-            [buyer],
-            priorityFees,
-            commitment,
-            finality
+          this.connection,
+          buyTx,
+          buyer.publicKey,
+          [buyer],
+          priorityFees,
+          commitment,
+          finality
         );
         return buyResults;
-    }
-
-    async sell(
+      }
+    
+      async sell(
         seller: Keypair,
         mint: PublicKey,
         sellTokenAmount: bigint,
@@ -501,300 +640,300 @@ export class PumpFunSDK {
         priorityFees?: PriorityFee,
         commitment: Commitment = commitmentType.Confirmed,
         finality: Finality = commitmentType.Finalized
-    ): Promise<TransactionResult> {
+      ): Promise<TransactionResult> {
         const sellTx = await this.getSellInstructionsByTokenAmount(
-            seller.publicKey,
-            mint,
-            sellTokenAmount,
-            slippageBasisPoints,
-            commitment
+          seller.publicKey,
+          mint,
+          sellTokenAmount,
+          slippageBasisPoints,
+          commitment
         );
-
+    
         const sellResults = await sendTx(
-            this.connection,
-            sellTx,
-            seller.publicKey,
-            [seller],
-            priorityFees,
-            commitment,
-            finality
+          this.connection,
+          sellTx,
+          seller.publicKey,
+          [seller],
+          priorityFees,
+          commitment,
+          finality
         );
         return sellResults;
-    }
-
-    async getCreateInstructions(
+      }
+    
+      async getCreateInstructions(
         creator: PublicKey,
         name: string,
         symbol: string,
         uri: string,
         mint: Keypair
-    ) {
+      ) {
         const mplTokenMetadata = this.MPL_TOKEN_METADATA_PROGRAM_ID;
-
+    
         const [metadataPDA] = PublicKey.findProgramAddressSync(
-            [
-                Buffer.from(this.METADATA_SEED),
-                mplTokenMetadata.toBuffer(),
-                mint.publicKey.toBuffer(),
-            ],
-            mplTokenMetadata
+          [
+            Buffer.from(this.METADATA_SEED),
+            mplTokenMetadata.toBuffer(),
+            mint.publicKey.toBuffer(),
+          ],
+          mplTokenMetadata
         );
-
+    
         const associatedBondingCurve = await getAssociatedTokenAddress(
-            mint.publicKey,
-            this.getBondingCurvePDA(mint.publicKey),
-            true
+          mint.publicKey,
+          this.getBondingCurvePDA(mint.publicKey),
+          true
         );
-
+    
         return this.program.methods
-            .create(name, symbol, uri)
-            .accounts({
-                mint: mint.publicKey,
-                associatedBondingCurve: associatedBondingCurve,
-                metadata: metadataPDA,
-                user: creator,
-            })
-            .signers([mint])
-            .transaction();
-    }
-
-    async getBuyInstructionsBySolAmount(
+          .create(name, symbol, uri, creator)
+          .accounts({
+            mint: mint.publicKey,
+            associatedBondingCurve: associatedBondingCurve,
+            metadata: metadataPDA,
+            user: creator,
+          })
+          .signers([mint])
+          .transaction();
+      }
+    
+      async getBuyInstructionsBySolAmount(
         buyer: PublicKey,
         mint: PublicKey,
         buyAmountSol: bigint,
         slippageBasisPoints: bigint = 500n,
         commitment: Commitment = commitmentType.Confirmed
-    ) {
+      ) {
         const bondingCurveAccount = await this.getBondingCurveAccount(
-            mint,
-            commitment
+          mint,
+          commitment
         );
         if (!bondingCurveAccount) {
-            throw new Error(`Bonding curve account not found: ${mint.toBase58()}`);
+          throw new Error(`Bonding curve account not found: ${mint.toBase58()}`);
         }
-
+    
         const buyAmount = bondingCurveAccount.getBuyPrice(buyAmountSol);
         const buyAmountWithSlippage = calculateWithSlippageBuy(
-            buyAmountSol,
-            slippageBasisPoints
+          buyAmountSol,
+          slippageBasisPoints
         );
-
+    
         const globalAccount = await this.getGlobalAccount(commitment);
-
+    
         return await this.getBuyInstructions(
-            buyer,
-            mint,
-            globalAccount.feeRecipient,
-            buyAmount,
-            buyAmountWithSlippage
+          buyer,
+          mint,
+          globalAccount.feeRecipient,
+          buyAmount,
+          buyAmountWithSlippage
         );
-    }
-
-    async getBuyInstructions(
+      }
+    
+      async getBuyInstructions(
         buyer: PublicKey,
         mint: PublicKey,
         feeRecipient: PublicKey,
         amount: bigint,
         solAmount: bigint,
-        commitment: Commitment = commitmentType.Confirmed,
-    ) {
+        commitment: Commitment = commitmentType.Confirmed
+      ) {
         const associatedBondingCurve = await getAssociatedTokenAddress(
-            mint,
-            this.getBondingCurvePDA(mint),
-            true
+          mint,
+          this.getBondingCurvePDA(mint),
+          true
         );
-
+    
         const associatedUser = await getAssociatedTokenAddress(mint, buyer, false);
-
+    
         const transaction = new Transaction();
-
+    
         try {
-            await getAccount(this.connection, associatedUser, commitment);
+          await getAccount(this.connection, associatedUser, commitment);
         } catch (e) {
-            transaction.add(
-                createAssociatedTokenAccountInstruction(
-                    buyer,
-                    associatedUser,
-                    buyer,
-                    mint
-                )
-            );
+          transaction.add(
+            createAssociatedTokenAccountInstruction(
+              buyer,
+              associatedUser,
+              buyer,
+              mint
+            )
+          );
         }
-
+    
         transaction.add(
-            await this.program.methods
-                .buy(new BN(amount.toString()), new BN(solAmount.toString()))
-                .accounts({
-                    feeRecipient: feeRecipient,
-                    mint: mint,
-                    associatedBondingCurve: associatedBondingCurve,
-                    associatedUser: associatedUser,
-                    user: buyer,
-                })
-                .transaction()
+          await this.program.methods
+            .buy(new BN(amount.toString()), new BN(solAmount.toString()))
+            .accounts({
+              feeRecipient: feeRecipient,
+              mint: mint,
+              associatedBondingCurve: associatedBondingCurve,
+              associatedUser: associatedUser,
+              user: buyer,
+            })
+            .transaction()
         );
-
+    
         return transaction;
-    }
-
-    async getSellInstructionsByTokenAmount(
+      }
+    
+      async getSellInstructionsByTokenAmount(
         seller: PublicKey,
         mint: PublicKey,
         sellTokenAmount: bigint,
         slippageBasisPoints: bigint = 500n,
         commitment: Commitment = commitmentType.Confirmed
-    ) {
+      ) {
         const bondingCurveAccount = await this.getBondingCurveAccount(
-            mint,
-            commitment
+          mint,
+          commitment
         );
         if (!bondingCurveAccount) {
-            throw new Error(`Bonding curve account not found: ${mint.toBase58()}`);
+          throw new Error(`Bonding curve account not found: ${mint.toBase58()}`);
         }
-
+    
         const globalAccount = await this.getGlobalAccount(commitment);
-
+    
         const minSolOutput = bondingCurveAccount.getSellPrice(
-            sellTokenAmount,
-            globalAccount.feeBasisPoints
+          sellTokenAmount,
+          globalAccount.feeBasisPoints
         );
-
+    
         const sellAmountWithSlippage = calculateWithSlippageSell(
-            minSolOutput,
-            slippageBasisPoints
+          minSolOutput,
+          slippageBasisPoints
         );
-
+    
         return await this.getSellInstructions(
-            seller,
-            mint,
-            globalAccount.feeRecipient,
-            sellTokenAmount,
-            sellAmountWithSlippage
+          seller,
+          mint,
+          globalAccount.feeRecipient,
+          sellTokenAmount,
+          sellAmountWithSlippage
         );
-    }
-
-    async getSellInstructions(
+      }
+    
+      async getSellInstructions(
         seller: PublicKey,
         mint: PublicKey,
         feeRecipient: PublicKey,
         amount: bigint,
         minSolOutput: bigint
-    ) {
+      ) {
         const associatedBondingCurve = await getAssociatedTokenAddress(
-            mint,
-            this.getBondingCurvePDA(mint),
-            true
+          mint,
+          this.getBondingCurvePDA(mint),
+          true
         );
-
+    
         const associatedUser = await getAssociatedTokenAddress(mint, seller, false);
-
+    
         const transaction = new Transaction();
-
+    
         transaction.add(
-            await this.program.methods
-                .sell(new BN(amount.toString()), new BN(minSolOutput.toString()))
-                .accounts({
-                    feeRecipient: feeRecipient,
-                    mint: mint,
-                    associatedBondingCurve: associatedBondingCurve,
-                    associatedUser: associatedUser,
-                    user: seller,
-                })
-                .transaction()
+          await this.program.methods
+            .sell(new BN(amount.toString()), new BN(minSolOutput.toString()))
+            .accounts({
+              feeRecipient: feeRecipient,
+              mint: mint,
+              associatedBondingCurve: associatedBondingCurve,
+              associatedUser: associatedUser,
+              user: seller,
+            })
+            .transaction()
         );
-
+    
         return transaction;
-    }
-
-    async getBondingCurveAccount(
+      }
+    
+      async getBondingCurveAccount(
         mint: PublicKey,
         commitment: Commitment = commitmentType.Confirmed
-    ) {
+      ) {
         const tokenAccount = await this.connection.getAccountInfo(
-            this.getBondingCurvePDA(mint),
-            commitment
+          this.getBondingCurvePDA(mint),
+          commitment
         );
         if (!tokenAccount) {
-            return null;
+          return null;
         }
         return BondingCurveAccount.fromBuffer(tokenAccount!.data);
-    }
-
-    async getGlobalAccount(commitment: Commitment = commitmentType.Confirmed) {
+      }
+    
+      async getGlobalAccount(commitment: Commitment = commitmentType.Confirmed) {
         const [globalAccountPDA] = PublicKey.findProgramAddressSync(
-            [Buffer.from(this.GLOBAL_ACCOUNT_SEED)],
-            this.PROGRAM_ID
+          [Buffer.from(this.GLOBAL_ACCOUNT_SEED)],
+          this.PROGRAM_ID
         );
-
+    
         const tokenAccount = await this.connection.getAccountInfo(
-            globalAccountPDA,
-            commitment
+          globalAccountPDA,
+          commitment
         );
-
+    
         return GlobalAccount.fromBuffer(tokenAccount!.data);
-    }
-
-    getBondingCurvePDA(mint: PublicKey) {
+      }
+    
+      getBondingCurvePDA(mint: PublicKey) {
         return PublicKey.findProgramAddressSync(
-            [Buffer.from(this.BONDING_CURVE_SEED), mint.toBuffer()],
-            this.program.programId
+          [Buffer.from(this.BONDING_CURVE_SEED), mint.toBuffer()],
+          this.program.programId
         )[0];
-    }
-
-    addEventListener<T extends PumpFunEventType>(
+      }
+    
+      addEventListener<T extends PumpFunEventType>(
         eventType: T,
         callback: (
-            event: PumpFunEventHandlers[T],
-            slot: number,
-            signature: string
+          event: PumpFunEventHandlers[T],
+          slot: number,
+          signature: string
         ) => void
-    ) {
+      ) {
         return this.program.addEventListener(
-            eventType,
-            (event: any, slot: number, signature: string) => {
-                let processedEvent;
-                switch (eventType) {
-                    case "createEvent":
-                        processedEvent = toCreateEvent(event as CreateEvent);
-                        callback(
-                            processedEvent as PumpFunEventHandlers[T],
-                            slot,
-                            signature
-                        );
-                        break;
-                    case "tradeEvent":
-                        processedEvent = toTradeEvent(event as TradeEvent);
-                        callback(
-                            processedEvent as PumpFunEventHandlers[T],
-                            slot,
-                            signature
-                        );
-                        break;
-                    case "completeEvent":
-                        processedEvent = toCompleteEvent(event as CompleteEvent);
-                        callback(
-                            processedEvent as PumpFunEventHandlers[T],
-                            slot,
-                            signature
-                        );
-                        console.log("completeEvent", event, slot, signature);
-                        break;
-                    case "setParamsEvent":
-                        processedEvent = toSetParamsEvent(event as SetParamsEvent);
-                        callback(
-                            processedEvent as PumpFunEventHandlers[T],
-                            slot,
-                            signature
-                        );
-                        break;
-                    default:
-                        console.error("Unhandled event type:", eventType);
-                }
+          eventType,
+          (event: any, slot: number, signature: string) => {
+            let processedEvent;
+            switch (eventType) {
+              case "createEvent":
+                processedEvent = toCreateEvent(event as CreateEvent);
+                callback(
+                  processedEvent as PumpFunEventHandlers[T],
+                  slot,
+                  signature
+                );
+                break;
+              case "tradeEvent":
+                processedEvent = toTradeEvent(event as TradeEvent);
+                callback(
+                  processedEvent as PumpFunEventHandlers[T],
+                  slot,
+                  signature
+                );
+                break;
+              case "completeEvent":
+                processedEvent = toCompleteEvent(event as CompleteEvent);
+                callback(
+                  processedEvent as PumpFunEventHandlers[T],
+                  slot,
+                  signature
+                );
+                break;
+              case "setParamsEvent":
+                processedEvent = toSetParamsEvent(event as SetParamsEvent);
+                callback(
+                  processedEvent as PumpFunEventHandlers[T],
+                  slot,
+                  signature
+                );
+                break;
+              default:
+                console.error("Unhandled event type:", eventType);
             }
+          }
         );
-    }
-
-    removeEventListener(eventId: number) {
+      }
+    
+      removeEventListener(eventId: number) {
         this.program.removeEventListener(eventId);
+      }
     }
-}
+    

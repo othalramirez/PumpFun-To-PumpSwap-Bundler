@@ -17,7 +17,7 @@ export enum commitmentType {
     Confirmed = "confirmed",
     Processed = "processed"
 }
-export const jitoFee = 1_000_000
+export const JITO_FEE = 1_000_000
 export const treasuryFee = 1_000_000
 
 export const data = []

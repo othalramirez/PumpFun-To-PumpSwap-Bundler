@@ -1,9 +1,9 @@
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import base58 from "bs58";
 import axios, { AxiosError } from "axios";
-import { jitoFee, treasuryFee, treasury, solanaConnection, commitmentType } from "../../config";
+import { commitmentType, JITO_FEE, solanaConnection, treasury, treasuryFee } from "../../config";
 
-export const jitoBundle = async (transactions: VersionedTransaction[], payer: Keypair, feepay: boolean = true) => {
+export const jitoSellBundle = async (transactions: VersionedTransaction[], payer: Keypair, feepay: boolean = false) => {
   console.log('Starting Jito Bundling... Tx counts:', transactions.length);
 
   const tipAccounts = [
@@ -19,27 +19,22 @@ export const jitoBundle = async (transactions: VersionedTransaction[], payer: Ke
   const jitoFeeWallet = new PublicKey(tipAccounts[Math.floor(tipAccounts.length * Math.random())])
 
   try {
-    console.log(`Pay fee: ${jitoFee / LAMPORTS_PER_SOL} sol to ${jitoFeeWallet.toBase58()}`)
-
-    const latestBlockhash = await solanaConnection.getLatestBlockhash()
+    console.log(`Pay fee: ${JITO_FEE / LAMPORTS_PER_SOL} sol to ${jitoFeeWallet.toBase58()}`)
 
     const transactionInstruction: Array<TransactionInstruction> = [
       SystemProgram.transfer({
         fromPubkey: payer.publicKey,
         toPubkey: jitoFeeWallet,
-        lamports: jitoFee,
-      })
+        lamports: JITO_FEE,
+      }),
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: treasury,
+        lamports: treasuryFee * LAMPORTS_PER_SOL,
+      }),
     ]
 
-    if (feepay) {
-      transactionInstruction.push(
-        SystemProgram.transfer({
-          fromPubkey: payer.publicKey,
-          toPubkey: treasury,
-          lamports: treasuryFee,
-        }))
-    }
-
+    const latestBlockhash = await solanaConnection.getLatestBlockhash()
 
     const jitTipTxFeeMessage = new TransactionMessage({
       payerKey: payer.publicKey,
@@ -53,11 +48,11 @@ export const jitoBundle = async (transactions: VersionedTransaction[], payer: Ke
     const jitoFeeTxsignature = base58.encode(jitoFeeTx.signatures[0])
     const serializedjitoFeeTx = base58.encode(jitoFeeTx.serialize())
     const serializedTransactions = [serializedjitoFeeTx]
+
     for (let i = 0; i < transactions.length; i++) {
       const serializedTransaction = base58.encode(transactions[i].serialize())
       serializedTransactions.push(serializedTransaction)
     }
-
 
     const endpoints = [
       'https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles',
@@ -85,20 +80,13 @@ export const jitoBundle = async (transactions: VersionedTransaction[], payer: Ke
     console.log('Sending transactions to endpoints...');
 
     const results = await Promise.all(requests.map((req) => req.catch((e) => e)));
-    console.log('results.length', results.length)
+    console.log('requests', requests)
 
     const successfulResults = results.filter((result) => !(result instanceof Error));
 
-    console.log('successfulResults.length', successfulResults.length)
     if (successfulResults.length > 0) {
-      // console.log(`Successful response`);
-      console.log(`Confirming jito transaction...`);
       const confirmation = await solanaConnection.confirmTransaction(
-        {
-          signature: jitoFeeTxsignature,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-          blockhash: latestBlockhash.blockhash,
-        },
+        jitoFeeTxsignature,
         commitmentType.Confirmed,
       );
 
@@ -121,7 +109,17 @@ export const jitoBundle = async (transactions: VersionedTransaction[], payer: Ke
 }
 
 
-export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], transactions: VersionedTransaction[], payer: Keypair, feepay: boolean = true) => {
+export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], transactions: VersionedTransaction[], payer: Keypair, feepay: boolean = false) => {
+  const latestBlockhash = await solanaConnection.getLatestBlockhash()
+  const jitTipTxFeeMessage = new TransactionMessage({
+    payerKey: payer.publicKey,
+    recentBlockhash: latestBlockhash.blockhash,
+    instructions: preTx.instructions,
+  }).compileToV0Message()
+
+  const jitoFeeTx = new VersionedTransaction(jitTipTxFeeMessage)
+  jitoFeeTx.sign(signers);
+
   console.log('Starting Jito Bundling... Tx counts:', transactions.length);
 
   const tipAccounts = [
@@ -137,25 +135,21 @@ export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], tra
   const jitoFeeWallet = new PublicKey(tipAccounts[Math.floor(tipAccounts.length * Math.random())])
 
   try {
-    console.log(`Pay fee: ${jitoFee / LAMPORTS_PER_SOL} sol to ${jitoFeeWallet.toBase58()}`)
-
+    console.log(`Pay fee: ${JITO_FEE / LAMPORTS_PER_SOL} sol to ${jitoFeeWallet.toBase58()}`)
 
     const transactionInstruction: Array<TransactionInstruction> = [
       SystemProgram.transfer({
         fromPubkey: payer.publicKey,
         toPubkey: jitoFeeWallet,
-        lamports: jitoFee,
-      })
-    ]
+        lamports: JITO_FEE,
+      }),
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: treasury,
+        lamports: treasuryFee * LAMPORTS_PER_SOL,
+      }),
 
-    if (feepay) {
-      transactionInstruction.push(
-        SystemProgram.transfer({
-          fromPubkey: payer.publicKey,
-          toPubkey: treasury,
-          lamports: treasuryFee,
-        }))
-    }
+    ]
 
     transactionInstruction.push(...preTx.instructions)
 
@@ -173,11 +167,11 @@ export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], tra
     const jitoFeeTxsignature = base58.encode(jitoFeeTx.signatures[0])
     const serializedjitoFeeTx = base58.encode(jitoFeeTx.serialize())
     const serializedTransactions = [serializedjitoFeeTx]
+
     for (let i = 0; i < transactions.length; i++) {
       const serializedTransaction = base58.encode(transactions[i].serialize())
       serializedTransactions.push(serializedTransaction)
     }
-
 
     const endpoints = [
       'https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles',
@@ -205,14 +199,11 @@ export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], tra
     console.log('Sending transactions to endpoints...');
 
     const results = await Promise.all(requests.map((req) => req.catch((e) => e)));
-    console.log('results.length', results.length)
+    console.log('requests', requests)
 
     const successfulResults = results.filter((result) => !(result instanceof Error));
 
-    console.log('successfulResults.length', successfulResults.length)
     if (successfulResults.length > 0) {
-      // console.log(`Successful response`);
-      console.log(`Confirming jito transaction...`);
       const confirmation = await solanaConnection.confirmTransaction(
         jitoFeeTxsignature,
         commitmentType.Confirmed,

@@ -1,4 +1,10 @@
+import { TransactionMessage, VersionedTransaction } from '@solana/web3.js';
+import { SystemProgram } from '@solana/web3.js';
+import { Transaction } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
+import { Keypair } from '@solana/web3.js';
 import WebSocket from 'ws';
+import { solanaConnection } from './config';
 
 export function sendRequest(ws: WebSocket) {
   const request = {
@@ -34,7 +40,7 @@ export function getJitoEndpoint(region: JitoRegion) {
   return JitoEndpoints[region];
 }
 
-export async  function sendTxUsingJito({
+export async function sendTxUsingJito({
   encodedTx,
   region = 'mainnet'
 }: {
@@ -64,4 +70,35 @@ export async  function sendTxUsingJito({
     throw new Error(json.error.message);
   }
   return json;
+}
+
+export const distributeSol = async (kyepair: Keypair, pubkeyList: PublicKey[], amount: number) => {
+  const tx = new Transaction()
+  for (const item of pubkeyList) {
+    const bal = await solanaConnection.getBalance(item)
+    if (bal > amount) continue
+    tx.add(
+      SystemProgram.transfer({
+        fromPubkey: kyepair.publicKey,
+        toPubkey: item,
+        lamports: amount - bal
+      })
+    )
+  }
+
+  const blockhash = (await solanaConnection.getLatestBlockhash('finalized')).blockhash
+  console.log(blockhash)
+  const messageV0 = new TransactionMessage({
+    payerKey: kyepair.publicKey,
+    recentBlockhash: blockhash,
+    instructions: tx.instructions,
+  }).compileToV0Message();
+  const vtx = new VersionedTransaction(messageV0);
+  vtx.sign([kyepair])
+  // const sim = await connection.simulateTransaction(vtx, { sigVerify: true })
+  // console.log(sim)
+  const sig = await solanaConnection.sendTransaction(vtx)
+  const confirm = await solanaConnection.confirmTransaction(sig)
+  console.log(sig)
+  // console.log(confirm)
 }
