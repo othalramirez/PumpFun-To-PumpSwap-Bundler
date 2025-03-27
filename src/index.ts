@@ -83,6 +83,8 @@ const withGaser = () => {
         console.log('WebSocket is closed');
     });
 
+    let i = 0
+
     ws.on('message', async function incoming(data: any) {
 
         const messageStr = data.toString('utf8');
@@ -92,80 +94,78 @@ const withGaser = () => {
             const logs = String(result.transaction.meta.logMessages);
             const signature = result.signature; // Extract the signature
             const accountKeys = result.transaction.transaction.message.accountKeys.map((ak: { pubkey: any; }) => ak.pubkey);
-            fs.appendFileSync('logs.txt', `${new Date().toUTCString()} ${signature}\n`)
-            fs.appendFileSync('logs.txt', `${logs}\n`)
+            // fs.appendFileSync('logs.txt', `${new Date().toUTCString()} ${signature}\n`)
+            // fs.appendFileSync('logs.txt', `${logs}\n`)
 
-            if (logs.includes('I')) {
+            if (logs.includes('Program log: Instruction: InitializeMint2')) {
                 const mint = new PublicKey(accountKeys[1])
                 const bondingCurve = new PublicKey(accountKeys[2])
                 const slot = await solanaConnection.getSlot('processed')
                 const txSlot = messageObj.params.result.slot
                 console.log('created', slot, txSlot)
-                console.log('signature', signature)
+                // console.log('signature', signature)
 
-                // if (slot + 2 < parseInt(messageObj.params.result.slot)) {
-                //     console.time("1")
-                //     console.log("=========================================");
-                //     console.log("current : ", slot);
-                //     console.log("tx : ", messageObj.params.result.slot);
-                //     console.log("Detect Sig : ", signature);
-                //     ws.close()
+                if (slot + 2 < txSlot) {
+                    console.time("1")
+                    console.log("=========================================");
+                    console.log("current : ", slot);
+                    console.log("tx : ", messageObj.params.result.slot);
+                    console.log("Detect Sig : ", signature);
+                    ws.close()
 
-                //     const userAta = getAssociatedTokenAddressSync(mint, buyer.publicKey)
-                //     const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
+                    // const userAta = getAssociatedTokenAddressSync(mint, buyer.publicKey)
+                    // const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
 
-                //     const tx = new Transaction()
-                //     tx.add(createAssociatedTokenAccountInstruction(buyer.publicKey, userAta, buyer.publicKey, mint));
-                //     const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({ units: 100000, });
+                    // const tx = new Transaction()
+                    // tx.add(createAssociatedTokenAccountInstruction(buyer.publicKey, userAta, buyer.publicKey, mint));
+                    // const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({ units: 100000, });
 
-                //     const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 30000000, })
+                    // const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 30000000, })
 
-                //     const serviceFee = SystemProgram.transfer({
-                //         fromPubkey: buyer.publicKey,
-                //         toPubkey: jitoTipAcc,
-                //         lamports: 0.001 * LAMPORTS_PER_SOL
-                //     })
+                    // const serviceFee = SystemProgram.transfer({
+                    //     fromPubkey: buyer.publicKey,
+                    //     toPubkey: jitoTipAcc,
+                    //     lamports: 0.001 * LAMPORTS_PER_SOL
+                    // })
 
-                //     tx
-                //         // .add(modifyComputeUnits)
-                //         // .add(addPriorityFee)
-                //         .add(
-                //             await program.methods
-                //                 .buy(new BN(BUY_AMOUNT.toString()), new BN(MAX_SOL_COST.toString()))
-                //                 .accounts({
-                //                     feeRecipient: PUMPFUN_FEE_RECEIPT,
-                //                     mint: mint,
-                //                     associatedBondingCurve: associatedBondingCurve,
-                //                     associatedUser: userAta,
-                //                     user: buyer.publicKey,
-                //                 })
-                //                 .transaction()
-                //         )
-                //         .add(serviceFee)
+                    // tx
+                    //     // .add(modifyComputeUnits)
+                    //     // .add(addPriorityFee)
+                    //     .add(
+                    //         await program.methods
+                    //             .buy(new BN(BUY_AMOUNT.toString()), new BN(MAX_SOL_COST.toString()))
+                    //             .accounts({
+                    //                 feeRecipient: PUMPFUN_FEE_RECEIPT,
+                    //                 mint: mint,
+                    //                 associatedBondingCurve: associatedBondingCurve,
+                    //                 associatedUser: userAta,
+                    //                 user: buyer.publicKey,
+                    //             })
+                    //             .transaction()
+                    //     )
+                    //     .add(serviceFee)
 
-                //     tx.feePayer = buyer.publicKey;
+                    // tx.feePayer = buyer.publicKey;
 
-                //     const latestBlockhash = await solanaConnection.getLatestBlockhash({ commitment: "processed" })
-                //     tx.recentBlockhash = latestBlockhash.blockhash;
+                    // const latestBlockhash = await solanaConnection.getLatestBlockhash({ commitment: "processed" })
+                    // tx.recentBlockhash = latestBlockhash.blockhash;
 
-                //     tx.sign(buyer);
+                    // tx.sign(buyer);
 
-                //     console.timeEnd("1")
-                //     console.time("7")
+                    // console.timeEnd("1")
+                    // console.time("7")
 
-                //     const serializedTx = tx.serialize()
-                //     const transactionContent = bs58.encode(serializedTx);
+                    // const serializedTx = tx.serialize()
+                    // const transactionContent = bs58.encode(serializedTx);
 
-                //     if (i++ != 0) return;
+                    // if (i++ != 0) return;
 
-                //     const sig = await sendTxUsingJito({ encodedTx: transactionContent, region: "frankfurt" })
-                //     solanaConnection.getSlot().then(ele => console.log("Bot Ended Slot : ", ele))
-                //     console.log(sig);
-                //     console.timeEnd("7");
+                    // const sig = await sendTxUsingJito({ encodedTx: transactionContent, region: "frankfurt" })
+                    // solanaConnection.getSlot().then(ele => console.log("Bot Ended Slot : ", ele))
+                    // console.log(sig);
+                    // console.timeEnd("7");
 
-                // }
-            } else {
-                console.log('swap')
+                }
             }
         } catch (e) {
             console.log(e)
