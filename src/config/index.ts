@@ -1,6 +1,8 @@
 import 'dotenv/config'
-import { Connection, Keypair, PublicKey } from "@solana/web3.js"
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js"
 import bs58 from 'bs58'
+import { AnchorProvider } from '@coral-xyz/anchor'
+import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet'
 
 export const mainKeypairHex = process.env.MAIN_KEYPAIR_HEX!
 export const mainKeypair = Keypair.fromSecretKey(bs58.decode(mainKeypairHex))
@@ -12,13 +14,21 @@ export const devWssUrl = process.env.DEV_WSS_URL!
 export const devConnection = new Connection(devRpcUrl, { wsEndpoint: devWssUrl })
 export const geyserRpc = process.env.GEYSER_RPC;
 export const treasury = new PublicKey(process.env.TREASURY_WALLET!)
+export const wallet = new NodeWallet(mainKeypair)
+export const provider = new AnchorProvider(solanaConnection, wallet, {
+    commitment: "finalized",
+});
 export enum commitmentType {
     Finalized = "finalized",
     Confirmed = "confirmed",
     Processed = "processed"
 }
 export const JITO_FEE = 1_000_000
-export const treasuryFee = 1_000_000
+export const TREASURY_FEE = Number(process.env.TREASURY_FEE!)
+export const TREASURY_MODE = Boolean(process.env.TREASURY_MODE!)
+export const MAIN_WALLET_FEE = 0.0015 + JITO_FEE / LAMPORTS_PER_SOL + (TREASURY_MODE ? TREASURY_FEE : 0)
+export const LUT_FEE = 0.011
+export const SUB_WALLET_FEE = 0.0022
 
 export const data = []
 
@@ -36,4 +46,4 @@ export const JITO_TIP_ACC = [
     "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
     "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
     "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"
-  ]
+]

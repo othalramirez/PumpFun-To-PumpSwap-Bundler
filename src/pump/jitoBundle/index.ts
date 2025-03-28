@@ -1,9 +1,9 @@
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import base58 from "bs58";
 import axios, { AxiosError } from "axios";
-import { commitmentType, JITO_FEE, solanaConnection, treasury, treasuryFee } from "../../config";
+import { commitmentType, JITO_FEE, solanaConnection, treasury, TREASURY_FEE, TREASURY_MODE } from "../../config";
 
-export const jitoSellBundle = async (transactions: VersionedTransaction[], payer: Keypair, feepay: boolean = false) => {
+export const jitoSellBundle = async (transactions: VersionedTransaction[], payer: Keypair) => {
   console.log('Starting Jito Bundling... Tx counts:', transactions.length);
 
   const tipAccounts = [
@@ -26,13 +26,16 @@ export const jitoSellBundle = async (transactions: VersionedTransaction[], payer
         fromPubkey: payer.publicKey,
         toPubkey: jitoFeeWallet,
         lamports: JITO_FEE,
-      }),
-      SystemProgram.transfer({
-        fromPubkey: payer.publicKey,
-        toPubkey: treasury,
-        lamports: treasuryFee * LAMPORTS_PER_SOL,
-      }),
+      })
     ]
+
+    // if (TREASURY_MODE) transactionInstruction.push(
+    //   SystemProgram.transfer({
+    //     fromPubkey: payer.publicKey,
+    //     toPubkey: treasury,
+    //     lamports: TREASURY_FEE * LAMPORTS_PER_SOL,
+    //   }),
+    // )
 
     const latestBlockhash = await solanaConnection.getLatestBlockhash()
 
@@ -49,7 +52,11 @@ export const jitoSellBundle = async (transactions: VersionedTransaction[], payer
     const serializedjitoFeeTx = base58.encode(jitoFeeTx.serialize())
     const serializedTransactions = [serializedjitoFeeTx]
 
+    const sim = await solanaConnection.simulateTransaction(jitoFeeTx)
+    console.log(sim)
     for (let i = 0; i < transactions.length; i++) {
+      const sim = await solanaConnection.simulateTransaction(transactions[i])
+      console.log(i, '------------------------', sim)
       const serializedTransaction = base58.encode(transactions[i].serialize())
       serializedTransactions.push(serializedTransaction)
     }
@@ -108,18 +115,7 @@ export const jitoSellBundle = async (transactions: VersionedTransaction[], payer
   }
 }
 
-
-export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], transactions: VersionedTransaction[], payer: Keypair, feepay: boolean = false) => {
-  const latestBlockhash = await solanaConnection.getLatestBlockhash()
-  const jitTipTxFeeMessage = new TransactionMessage({
-    payerKey: payer.publicKey,
-    recentBlockhash: latestBlockhash.blockhash,
-    instructions: preTx.instructions,
-  }).compileToV0Message()
-
-  const jitoFeeTx = new VersionedTransaction(jitTipTxFeeMessage)
-  jitoFeeTx.sign(signers);
-
+export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], transactions: VersionedTransaction[], payer: Keypair) => {
   console.log('Starting Jito Bundling... Tx counts:', transactions.length);
 
   const tipAccounts = [
@@ -142,18 +138,20 @@ export const jitoPumpBundle = async (preTx: Transaction, signers: Keypair[], tra
         fromPubkey: payer.publicKey,
         toPubkey: jitoFeeWallet,
         lamports: JITO_FEE,
-      }),
-      SystemProgram.transfer({
-        fromPubkey: payer.publicKey,
-        toPubkey: treasury,
-        lamports: treasuryFee * LAMPORTS_PER_SOL,
-      }),
-
+      })
     ]
+
+    // if (TREASURY_MODE) transactionInstruction.push(
+    //   SystemProgram.transfer({
+    //     fromPubkey: payer.publicKey,
+    //     toPubkey: treasury,
+    //     lamports: TREASURY_FEE * LAMPORTS_PER_SOL,
+    //   }),
+    // )
 
     transactionInstruction.push(...preTx.instructions)
 
-    const latestBlockhash = await solanaConnection.getLatestBlockhash()
+    const latestBlockhash = await solanaConnection.getLatestBlockhash('finalized')
 
     const jitTipTxFeeMessage = new TransactionMessage({
       payerKey: payer.publicKey,

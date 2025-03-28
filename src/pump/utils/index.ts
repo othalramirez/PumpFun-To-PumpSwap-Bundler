@@ -18,7 +18,8 @@ import {
   AddressLookupTableProgram,
 } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { commitmentType, solanaConnection } from "../../config";
+import { commitmentType, LUT_FEE, MAIN_WALLET_FEE, solanaConnection, SUB_WALLET_FEE } from "../../config";
+import { publicKey } from "@project-serum/anchor/dist/cjs/utils";
 // import { commitmentType } from "../../../config/contant";
 // import { solanaConnection } from "../../../config/env";
 
@@ -64,7 +65,7 @@ export const createLookupTable = async (
     const slot = await solanaConnection.getSlot();
 
     addresses.push(AddressLookupTableProgram.programId);
-    console.log(addresses.length);
+    console.log('lut addresses counts', addresses.length);
     const [lookupTableInst, lookupTableAddress] =
       AddressLookupTableProgram.createLookupTable({
         authority: signer.publicKey,
@@ -137,9 +138,7 @@ export const deactiveLookupTable = async (
       ],
     }
   );
-
-  console.log(res.map((item) => item.pubkey.toBase58()));
-
+  console.log(res.length)
   const instructions: Array<TransactionInstruction> = [];
   res.map((item) => {
     if (item.pubkey.toBase58() != "") {
@@ -151,35 +150,40 @@ export const deactiveLookupTable = async (
     }
   });
 
-  for (let i = 0; i < instructions.length; i += 25) {
+  const count = 25
+  for (let i = 0; i < instructions.length; i += count) {
     const blockhash = await solanaConnection
       .getLatestBlockhash()
       .then((res) => res.blockhash);
 
     const instructionsList = instructions.slice(
       i,
-      Math.min(i + 25, instructions.length)
+      Math.min(i + count, instructions.length)
     );
     const messageV0 = new TransactionMessage({
-      payerKey: signer.publicKey,
+      payerKey: payer ? payer.publicKey : signer.publicKey,
       recentBlockhash: blockhash,
       instructions: instructionsList,
     }).compileToV0Message();
 
     const vtx = new VersionedTransaction(messageV0);
-    vtx.sign([signer]);
+    const signers = payer ? [payer, signer] : [signer]
+    vtx.sign(signers);
 
     const sim = await solanaConnection.simulateTransaction(vtx);
     console.log(sim);
-
-    const sig = await solanaConnection.sendTransaction(vtx);
-    const confirm = await solanaConnection.confirmTransaction(sig);
+    if (!sim.value.err) {
+      const sig = await solanaConnection.sendTransaction(vtx);
+      const confirm = await solanaConnection.confirmTransaction(sig);
+      console.log('lut deactive sig', sig)
+    }
   }
 };
 
 export const closeLookupTable = async (
   solanaConnection: Connection,
-  signer: Keypair
+  signer: Keypair,
+  payer?: Keypair
 ) => {
   const res = await solanaConnection.getProgramAccounts(
     AddressLookupTableProgram.programId,
@@ -201,7 +205,7 @@ export const closeLookupTable = async (
       const closeInx = AddressLookupTableProgram.closeLookupTable({
         lookupTable: item.pubkey, // Address of the lookup table to close
         authority: signer.publicKey, // Authority to close the LUT
-        recipient: signer.publicKey, // Recipient of the reclaimed rent balance
+        recipient: payer ? payer.publicKey : signer.publicKey, // Recipient of the reclaimed rent balance
       });
       instructions.push(closeInx);
     }
@@ -217,21 +221,29 @@ export const closeLookupTable = async (
       Math.min(i + 25, instructions.length)
     );
     const messageV0 = new TransactionMessage({
-      payerKey: signer.publicKey,
+      payerKey: payer ? payer.publicKey : signer.publicKey,
       recentBlockhash: blockhash,
       instructions: instructionsList,
     }).compileToV0Message();
 
     const vtx = new VersionedTransaction(messageV0);
-    vtx.sign([signer]);
+    const signers = payer ? [payer, signer] : [signer]
+    vtx.sign(signers);
 
     const sim = await solanaConnection.simulateTransaction(vtx);
     console.log(sim);
 
     const sig = await solanaConnection.sendTransaction(vtx);
     const confirm = await solanaConnection.confirmTransaction(sig);
+    console.log('lut close sig', sig)
   }
 };
+
+export const burnLUT = async (solanaConnection: Connection, signer: Keypair, payer?: Keypair) => {
+  await deactiveLookupTable(solanaConnection, signer, payer)
+  await sleep(300_000)
+  await closeLookupTable(solanaConnection, signer, payer)
+}
 
 export const calculateWithSlippageBuy = (
   amount: bigint,
@@ -408,7 +420,7 @@ export const getSPLBalance = async (
     );
     const balance = await solanaConnection.getTokenAccountBalance(ata, "processed");
     return balance.value.uiAmount;
-  } catch (e) {}
+  } catch (e) { }
   return null;
 };
 
@@ -437,52 +449,6 @@ export const valueToBase = (value: number, decimals: number): number => {
   return value / Math.pow(10, decimals);
 };
 
-export const distributSol = async (
-  data: Array<{ wallet: string; amount: number }>
-) => {
-  const pubKeyList = data
-    .slice(1)
-    .map((item) => Keypair.fromSecretKey(bs58.decode(item.wallet)).publicKey);
-  const mainkey = Keypair.fromSecretKey(bs58.decode(data[0].wallet));
-  const ixs: TransactionInstruction[] = [];
-
-  for (let i = 0; i < pubKeyList.length; i++) {
-    const bal = await solanaConnection.getBalance(pubKeyList[i]);
-    console.log(i, bal);
-
-    if (bal < 1_000_000 + data[i].amount * LAMPORTS_PER_SOL) {
-      const amount = 900_000 + data[i].amount * LAMPORTS_PER_SOL - bal;
-      console.log(i, amount);
-      ixs.push(
-        SystemProgram.transfer({
-          fromPubkey: mainkey.publicKey,
-          toPubkey: pubKeyList[i],
-          lamports: amount,
-        })
-      );
-    }
-  }
-
-  const latestBlockhash = await solanaConnection.getLatestBlockhash("finalized");
-
-  const txMsg = new TransactionMessage({
-    payerKey: mainkey.publicKey,
-    recentBlockhash: latestBlockhash.blockhash,
-    instructions: ixs,
-  }).compileToV0Message();
-
-  const vtx = new VersionedTransaction(txMsg);
-  vtx.sign([mainkey]);
-
-  const sim = await solanaConnection.simulateTransaction(vtx);
-  console.log(sim);
-
-  const sig = await solanaConnection.sendTransaction(vtx);
-  const confirm = await solanaConnection.confirmTransaction(sig);
-
-  console.log(sig);
-};
-
 export const chunkArray = <T>(array: T[], chunkSize: number): T[][] => {
   const result: T[][] = [];
 
@@ -493,3 +459,96 @@ export const chunkArray = <T>(array: T[], chunkSize: number): T[][] => {
 
   return result;
 };
+
+
+export const distributeSol = async (kyepair: Keypair, pubkeyList: PublicKey[], amount: number) => {
+  const tx = new Transaction()
+  for (const item of pubkeyList) {
+    const bal = await solanaConnection.getBalance(item)
+    if (bal > amount) continue
+    tx.add(
+      SystemProgram.transfer({
+        fromPubkey: kyepair.publicKey,
+        toPubkey: item,
+        lamports: Math.round(amount - bal)
+      })
+    )
+  }
+
+  if (tx.instructions.length == 0) return
+
+  const blockhash = (await solanaConnection.getLatestBlockhash('finalized')).blockhash
+  console.log(blockhash)
+  const messageV0 = new TransactionMessage({
+    payerKey: kyepair.publicKey,
+    recentBlockhash: blockhash,
+    instructions: tx.instructions,
+  }).compileToV0Message();
+  const vtx = new VersionedTransaction(messageV0);
+  vtx.sign([kyepair])
+  const sim = await solanaConnection.simulateTransaction(vtx, { sigVerify: true })
+  if (!sim.value.err) {
+    const sig = await solanaConnection.sendTransaction(vtx)
+    const confirm = await solanaConnection.confirmTransaction(sig)
+    console.log(sig)
+  } else {
+    console.log(sim.value.err)
+  }
+}
+
+export const validateBundle = async (mainWallet: PublicKey, amount: number, count: number) => {
+  const balance = await solanaConnection.getBalance(mainWallet)
+  const limit = MAIN_WALLET_FEE + LUT_FEE * Math.ceil(count / 5) + count * (SUB_WALLET_FEE + amount * 1.1)
+  return balance / LAMPORTS_PER_SOL > limit
+}
+
+export const gatherSol = async (wallets: Keypair[], payer: Keypair) => {
+  const inx: TransactionInstruction[] = []
+  const signers: Keypair[] = []
+  for (const wallet of wallets) {
+    const balance = await solanaConnection.getBalance(wallet.publicKey);
+    if (balance > 0) {
+      console.log(wallet.publicKey.toBase58(), balance)
+      inx.push(SystemProgram.transfer({
+        fromPubkey: wallet.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: balance,
+      }))
+      signers.push(wallet)
+    }
+  }
+  const limit = 7
+  for (let i = 0; i < inx.length; i += limit) {
+    const inxList = inx.slice(i, Math.min(i + limit, inx.length));
+    const signersList = signers.slice(i, Math.min(i + limit, signers.length));
+    if (inxList.length == 0) break;
+
+    const blockhash = await solanaConnection
+      .getLatestBlockhash()
+      .then((res) => res.blockhash);
+    const messageV0 = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        // ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200000 }),
+        ...inxList,
+      ],
+    }).compileToV0Message();
+
+    const vtx = new VersionedTransaction(messageV0);
+    vtx.sign([...signersList, payer]);
+
+    const sim = await solanaConnection.simulateTransaction(vtx);
+    console.log(sim)
+
+    if (sim.value.err) {
+      console.log(sim.value.err)
+      continue
+    }
+    const sig = await solanaConnection.sendTransaction(vtx);
+    console.log(sig)
+
+    const confirm = await solanaConnection.confirmTransaction(sig);
+    // console.log(confirm)
+  }
+}
