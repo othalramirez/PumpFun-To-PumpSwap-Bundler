@@ -1,23 +1,13 @@
 import bs58 from 'bs58'
-import fs from 'fs'
-import { AnchorProvider, Program } from "@coral-xyz/anchor";
-import { geyserRpc, JITO_TIP_ACC, mainKeypair, solanaConnection } from "./config";
-import { PumpFunSDK } from "./pump";
-// import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
-import { openAsBlob, existsSync } from "fs";
-import WebSocket from 'ws';
 import path from "path";
+import fs, { openAsBlob, existsSync } from "fs";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
-import { sendRequest } from './utils';
-import { PumpFun, PumpFunIDL } from './pump/utils/IDL';
-import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet';
+import { mainKeypair, provider, solanaConnection, SUB_WALLET_FEE } from "./config";
+import { PumpFunSDK } from "./pump";
+import { burnLUT, distributeSol, gatherSol, sleep, validateBundle } from './pump/utils';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 
-const createAndBatchBuy = async () => {
-    const wallet = new NodeWallet(mainKeypair)
-    const provider = new AnchorProvider(solanaConnection, wallet, {
-        commitment: "finalized",
-    });
-
+const createAndBatchBuy = async (count: number, amount: number, fileName?: string, mintPath?: string) => {
     const imageName = 'tensorian.png'
 
     const uploadFolder = path.join(process.cwd(), '/src/image')
@@ -35,140 +25,90 @@ const createAndBatchBuy = async () => {
         symbol: 'EMY',
         description: 'This is pump.fun token created by enlomy using customized pump fun sdk',
         file: image,
-        twitter: 'https://x.com/en1omy',
-        telegram: 'https://t.me/enlomy',
-        website: 'https://enlomy.com',
+        // twitter: 'https://x.com/en1omy',
+        // telegram: 'https://t.me/enlomy',
+        // website: 'https://enlomy.com',
     }
+
+    let dataList: Array<string> = []
+    let length: number
+    if (fileName) {
+        dataList = JSON.parse(fs.readFileSync(fileName, 'utf8'))
+        length = dataList.length
+    } else {
+        for (let i = 0; i < count - 1; i++) {
+            const mint = Keypair.generate()
+            dataList.push(bs58.encode(mint.secretKey))
+        }
+        length = count
+        const uniqueName = `data_${Date.now()}.json`
+        console.log(uniqueName)
+        fs.writeFileSync(uniqueName, JSON.stringify(dataList, null, 2))
+    }
+
+    const buyers = [mainKeypair, ...dataList.map((item) => Keypair.fromSecretKey(Uint8Array.from(bs58.decode(item))))]
+
+    const possibility = await validateBundle(mainKeypair.publicKey, amount, length)
+
+    if (!possibility) {
+        console.log('Not enough balance')
+        return
+    }
+    await distributeSol(mainKeypair, buyers.slice(1).map((item) => item.publicKey), (SUB_WALLET_FEE + amount * 1.1) * LAMPORTS_PER_SOL)
 
     const sdk = new PumpFunSDK(provider)
-    const count = 20
-    const amount = 0.000001
 
-    const dataList: Array<string> = []
-    for (let i = 0; i < count; i++) {
-        const mint = Keypair.generate()
-        dataList.push(bs58.encode(mint.secretKey))
+    let mint: Keypair
+    if (mintPath) {
+        mint = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(mintPath, 'utf8'))))
+    } else {
+        mint = Keypair.generate()
+        fs.writeFileSync(`data_${mint.publicKey.toBase58()}.json`, JSON.stringify(Array.from(mint.secretKey)))
     }
-    console.log('--------------')
-    fs.writeFileSync('data.json', JSON.stringify({}))
-    // fs.writeFileSync('data.json', JSON.stringify(dataList, null, 2))
+    const buyAmountSol = buyers.map(() => BigInt(amount * LAMPORTS_PER_SOL))
+    const mintResult = await sdk.createAndBatchBuy(mainKeypair, buyers, buyAmountSol, tokenMetadata, mint)
+    // const mintResult = await sdk.createAndBuy(mainKeypair, tokenMetadata, 1000000n, mint)
 
-    // const mintResult = await sdk.createAndBatchBuy(keypairList, amountList, tokenMetadata, mint)
-    // console.log(mintResult)
+    console.log(mintResult)
 }
 
-const BUY_AMOUNT = 0.0001 * LAMPORTS_PER_SOL
-const MAX_SOL_COST = LAMPORTS_PER_SOL
+const batchSell = async (fileName: string, mint: string, lutAddress: PublicKey) => {
+    const sdk = new PumpFunSDK(provider)
+    const dataList = JSON.parse(fs.readFileSync(fileName, 'utf8'))
+    const wallets = dataList.map((item: string) => Keypair.fromSecretKey(Uint8Array.from(bs58.decode(item)))) as Array<Keypair>
+    const walletList = [mainKeypair, ...wallets]
+    const tokenAmount = await Promise.all(walletList.map(async (item) => {
+        const balance = await solanaConnection.getTokenAccountBalance(getAssociatedTokenAddressSync(new PublicKey(mint), item.publicKey))
+        return BigInt(balance.value.amount)
+    }))
 
-const withGaser = () => {
-    const creator = Keypair.fromSecretKey(Uint8Array.from(bs58.decode(process.env.HEX_KEY_1!)))
-    const buyer = Keypair.fromSecretKey(Uint8Array.from(bs58.decode(process.env.HEX_KEY_2!)))
-    const PUMPFUN_FEE_RECEIPT = new PublicKey("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM");
-    const wallet = new NodeWallet(buyer)
-    const provider = new AnchorProvider(solanaConnection, wallet, { commitment: "processed" });
-    const program = new Program<PumpFun>(PumpFunIDL as PumpFun, provider);
-
-    const jitoTipAcc = new PublicKey(Math.floor(Math.random() * JITO_TIP_ACC.length))
-
-    if (!geyserRpc) return console.log('Geyser RPC is not provided!');
-
-    const ws = new WebSocket(geyserRpc);
-
-    ws.on('open', function open() {
-        console.log('WebSocket is open');
-        sendRequest(ws);  // Send a request once the WebSocket is open
-    });
-
-    ws.on('close', function open() {
-        console.log('WebSocket is closed');
-    });
-
-    let i = 0
-
-    ws.on('message', async function incoming(data: any) {
-
-        const messageStr = data.toString('utf8');
-        try {
-            const messageObj = JSON.parse(messageStr);
-            const result = messageObj.params.result;
-            const logs = String(result.transaction.meta.logMessages);
-            const signature = result.signature; // Extract the signature
-            const accountKeys = result.transaction.transaction.message.accountKeys.map((ak: { pubkey: any; }) => ak.pubkey);
-            // fs.appendFileSync('logs.txt', `${new Date().toUTCString()} ${signature}\n`)
-            // fs.appendFileSync('logs.txt', `${logs}\n`)
-
-            if (logs.includes('Program log: Instruction: InitializeMint2')) {
-                const mint = new PublicKey(accountKeys[1])
-                const bondingCurve = new PublicKey(accountKeys[2])
-                const slot = await solanaConnection.getSlot('processed')
-                const txSlot = messageObj.params.result.slot
-                console.log('created', slot, txSlot)
-                // console.log('signature', signature)
-
-                if (slot + 2 < txSlot) {
-                    console.time("1")
-                    console.log("=========================================");
-                    console.log("current : ", slot);
-                    console.log("tx : ", messageObj.params.result.slot);
-                    console.log("Detect Sig : ", signature);
-                    ws.close()
-
-                    // const userAta = getAssociatedTokenAddressSync(mint, buyer.publicKey)
-                    // const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
-
-                    // const tx = new Transaction()
-                    // tx.add(createAssociatedTokenAccountInstruction(buyer.publicKey, userAta, buyer.publicKey, mint));
-                    // const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({ units: 100000, });
-
-                    // const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 30000000, })
-
-                    // const serviceFee = SystemProgram.transfer({
-                    //     fromPubkey: buyer.publicKey,
-                    //     toPubkey: jitoTipAcc,
-                    //     lamports: 0.001 * LAMPORTS_PER_SOL
-                    // })
-
-                    // tx
-                    //     // .add(modifyComputeUnits)
-                    //     // .add(addPriorityFee)
-                    //     .add(
-                    //         await program.methods
-                    //             .buy(new BN(BUY_AMOUNT.toString()), new BN(MAX_SOL_COST.toString()))
-                    //             .accounts({
-                    //                 feeRecipient: PUMPFUN_FEE_RECEIPT,
-                    //                 mint: mint,
-                    //                 associatedBondingCurve: associatedBondingCurve,
-                    //                 associatedUser: userAta,
-                    //                 user: buyer.publicKey,
-                    //             })
-                    //             .transaction()
-                    //     )
-                    //     .add(serviceFee)
-
-                    // tx.feePayer = buyer.publicKey;
-
-                    // const latestBlockhash = await solanaConnection.getLatestBlockhash({ commitment: "processed" })
-                    // tx.recentBlockhash = latestBlockhash.blockhash;
-
-                    // tx.sign(buyer);
-
-                    // console.timeEnd("1")
-                    // console.time("7")
-
-                    // const serializedTx = tx.serialize()
-                    // const transactionContent = bs58.encode(serializedTx);
-
-                    // if (i++ != 0) return;
-
-                    // const sig = await sendTxUsingJito({ encodedTx: transactionContent, region: "frankfurt" })
-                    // solanaConnection.getSlot().then(ele => console.log("Bot Ended Slot : ", ele))
-                    // console.log(sig);
-                    // console.timeEnd("7");
-
-                }
-            }
-        } catch (e) {
-            console.log(e)
-        }
-    })
+    console.log(walletList.length)
+    const mintResult = await sdk.batchSell(mainKeypair, new PublicKey(mint), walletList, tokenAmount, lutAddress)
+    console.log(mintResult)
+    if (mintResult.success) {
+        await sleep(10000)
+        await gatherSol(wallets, mainKeypair)
+    }
 }
+
+const withdrawAllSol = async (fileName: string) => {
+    const dataList = JSON.parse(fs.readFileSync(fileName, 'utf8'))
+    const wallets = dataList.map((item: string) => Keypair.fromSecretKey(Uint8Array.from(bs58.decode(item))))
+    await gatherSol(wallets, mainKeypair)
+}
+
+const withdrawLUT = async () => {
+    await burnLUT(solanaConnection, mainKeypair)
+}
+
+const test = async () => {
+    const sdk = new PumpFunSDK(provider)
+
+    const globalAccount = await sdk.getGlobalAccount('confirmed');
+    console.log(globalAccount)
+}
+
+// createAndBatchBuy(20, 0.00001, "", "")
+// batchSell('data_1743150825314.json', '8sYcQe4rdGizhL4d4vq5mJAfuGCiUw7NbAkWGFNtp5pF', new PublicKey('8WQCbhbFSVttCgosk7txccehSE2siBXs1myMLP4cNY4p'))
+// withdrawAllSol('data_1743147498107.json')
+// withdrawLUT()
