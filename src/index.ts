@@ -21,8 +21,8 @@ const createAndBatchBuy = async (count: number, amount: number, fileName?: strin
     const image = await openAsBlob(imagePath)
 
     const tokenMetadata = {
-        name: 'en1omy',
-        symbol: 'EMY',
+        name: 'Trump',
+        symbol: 'TP',
         description: 'This is pump.fun token created by enlomy using customized pump fun sdk',
         file: image,
         // twitter: 'https://x.com/en1omy',
