@@ -31,7 +31,7 @@ This repo provides high-performance transaction bundling using **Jito** and **Lo
 - **Lookup Tables**: For handling large transactions efficiently.
 
 ## ⚠️ Important Notice
-Due to security concerns, the source code includes only pumpfun bundler part, not pumpswap.
+Due to security concerns, the source code includes only pumpfun bundler part.
 
 For inquiries or specific use-case integratinos, feel free to reach out:
 
